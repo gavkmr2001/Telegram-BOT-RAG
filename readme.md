@@ -93,7 +93,7 @@ OPENAI_API_KEY="YOUR_OPENAI_API_KEY_HERE"
 4. Prepare the Knowledge Base
 Place your knowledge base documents (e.g., .md, .txt, or .pdf files) inside the /data directory.
 5. Run the Ingestion Process (One Time Only)
-Run the ingestion script to process your documents and create the vector store. This must be done once before you can run the bot. (Note: The script will automatically create the vector_store directory if it doesn't exist).
+Run the ingestion script to process your documents and create the vector store. This must be done once before you can run the bot. (Note: Please create the vector_store directory/folder before running the next command).
 code
 Bash
 python ingest.py
