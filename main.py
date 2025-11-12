@@ -1,6 +1,8 @@
 import logging
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from collections import deque
+from telegram.ext import PicklePersistence
 
 import config
 from rag_system import RAGSystem
@@ -29,7 +31,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handler for the /ask command."""
+    """Handler for the /ask command, now with message history."""
     query = " ".join(context.args)
     if not query:
         await update.message.reply_text("Please provide a question after the /ask command.")
@@ -37,21 +39,36 @@ async def ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Thinking...")
     
-    answer, sources = rag_system.get_answer(query)
+    # --- NEW: Message History Management ---
+    user_id = update.message.from_user.id
+    
+    # Initialize history for the user if it doesn't exist
+    if 'history' not in context.user_data:
+        # Use a deque for efficient fixed-length storage
+        context.user_data['history'] = deque(maxlen=config.MESSAGE_HISTORY_LENGTH)
+        
+    history = context.user_data['history']
+    
+    # --- END: Message History Management ---
 
-    # Format the response with sources
+    # Pass the history to the RAG system
+    answer, sources = rag_system.get_answer(query, history=list(history))
+
+    # --- NEW: Update the history with the new interaction ---
+    history.append((query, answer))
+    # --- END: Update History ---
+
+    # Format the response with sources (this part remains the same)
     response_message = f"**Answer:**\n{answer}\n\n"
     
     if sources:
         response_message += "**Sources:**\n"
         for i, source in enumerate(sources, 1):
             response_message += f"{i}. **{source['filename']}**\n"
-            # Show a small snippet from the source
             snippet = source['snippet'].strip().replace('\n', ' ')
             response_message += f"   *...{snippet[:100]}...*\n"
             
     await update.message.reply_text(response_message, parse_mode='Markdown')
-
 
 def main():
     """Main function to run the bot."""
@@ -63,7 +80,8 @@ def main():
     if not rag_system.load_vector_store():
         return # Stop if vector store loading fails
 
-    app = ApplicationBuilder().token(config.TELEGRAM_TOKEN).build()
+    persistence = PicklePersistence(filepath="bot_persistence")
+    app = ApplicationBuilder().token(config.TELEGRAM_TOKEN).persistence(persistence).build()
 
     # Add command handlers
     app.add_handler(CommandHandler("start", start))
