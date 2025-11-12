@@ -11,6 +11,7 @@ import config
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class RAGSystem:
     def __init__(self):
         """Initializes the RAG system, loading the embedding model and setting up caches."""
@@ -61,7 +62,11 @@ class RAGSystem:
         logging.info("Creating embeddings for all text chunks...")
         embeddings = self.embedding_model.encode(texts, show_progress_bar=True)
         
-        logging.info(f"Embeddings created with shape: {embeddings.shape}")
+        # --- NEW: Caching Mechanisms ---
+        # Cache for query embeddings to avoid re-calculating
+        self.embedding_cache = {}
+        # Simple cache for final answers to avoid re-running the whole chain for the same query
+        self.answer_cache = {}
 
         index = faiss.IndexFlatL2(embeddings.shape[1])
         index.add(np.array(embeddings, dtype=np.float32))
