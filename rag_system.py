@@ -13,92 +13,53 @@ import config
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
 class RAGSystem:
     def __init__(self):
-        """Initializes the RAG system, loading the embedding model."""
+        """Initializes the RAG system, loading the embedding model and setting up caches."""
         logging.info("Initializing RAG System...")
-        # Load the sentence-transformer model directly
         self.embedding_model = SentenceTransformer(config.EMBEDDING_MODEL_NAME)
         self.vector_store = None
         self.documents = []
         openai.api_key = config.OPENAI_API_KEY
+        
+        # --- NEW: Caching Mechanisms ---
+        # Cache for query embeddings to avoid re-calculating
+        self.embedding_cache = {}
+        # Simple cache for final answers to avoid re-running the whole chain for the same query
+        self.answer_cache = {}
+
         logging.info("RAG System Initialized.")
 
-    def _load_documents(self):
-        """Loads and chunks documents from the data directory."""
-        logging.info(f"Loading documents from {config.DATA_PATH}...")
-        all_texts = []
-        doc_metadata = []
-
-        for filename in os.listdir(config.DATA_PATH):
-            if filename.endswith((".md", ".txt", ".pdf")):
-                file_path = os.path.join(config.DATA_PATH, filename)
-                
-                # --- Simple Text Splitting Logic (Replaces LangChain's splitter) ---
-                with open(file_path, "r", encoding="utf-8") as f:
-                    text = f.read()
-                
-                # Split by paragraphs, then by sentences, then by words
-                chunks = [p.strip() for p in text.split('\n\n') if p.strip()]
-                
-                for i, chunk in enumerate(chunks):
-                    all_texts.append(chunk)
-                    doc_metadata.append({'source': filename, 'chunk_id': i})
-
-        self.documents = [{"text": text, "metadata": meta} for text, meta in zip(all_texts, doc_metadata)]
-        logging.info(f"Loaded and split documents into {len(self.documents)} chunks.")
-        return all_texts
-
-    def create_and_save_vector_store(self):
-        """Creates embeddings and saves the FAISS index to disk."""
-        texts = self._load_documents()
-        if not texts:
-            logging.error("No text chunks to process. Ingestion aborted.")
-            return
-
-        logging.info("Creating embeddings for all text chunks...")
-        embeddings = self.embedding_model.encode(texts, show_progress_bar=True)
+    # --- NEW: Caching for Embeddings ---
+    def _get_query_embedding(self, query: str):
+        """Gets the embedding for a query, using a cache to avoid re-computation."""
+        if query in self.embedding_cache:
+            logging.info(f"Embedding cache hit for query: '{query}'")
+            return self.embedding_cache[query]
         
-        logging.info(f"Embeddings created with shape: {embeddings.shape}")
+        logging.info(f"Embedding cache miss. Computing embedding for query: '{query}'")
+        embedding = self.embedding_model.encode([query])
+        self.embedding_cache[query] = embedding
+        return embedding
 
-        # Create a FAISS index
-        index = faiss.IndexFlatL2(embeddings.shape[1])
-        index.add(np.array(embeddings, dtype=np.float32))
-
-        logging.info(f"Saving FAISS index to {config.VECTOR_STORE_PATH}...")
-        faiss.write_index(index, config.VECTOR_STORE_PATH)
-        
-        # Save the document chunks themselves for later retrieval
-        import pickle
-        with open(config.VECTOR_STORE_PATH + ".pkl", "wb") as f:
-            pickle.dump(self.documents, f)
-
-        logging.info("Vector store created and saved successfully.")
-
-    def load_vector_store(self):
-        """Loads the FAISS index and documents from disk."""
-        if not os.path.exists(config.VECTOR_STORE_PATH):
-            logging.error(f"Vector store not found at {config.VECTOR_STORE_PATH}. Please run ingest.py first.")
-            return False
-            
-        logging.info(f"Loading vector store from {config.VECTOR_STORE_PATH}...")
-        self.vector_store = faiss.read_index(config.VECTOR_STORE_PATH)
-        
-        with open(config.VECTOR_STORE_PATH + ".pkl", "rb") as f:
-            self.documents = pickle.load(f)
-            
-        logging.info(f"Vector store and {len(self.documents)} document chunks loaded successfully.")
-        return True
-
-    def _build_prompt(self, query, context_chunks):
-        """Builds the prompt for the LLM with the retrieved context."""
+    def _build_prompt(self, query, context_chunks, history):
+        """Builds the prompt for the LLM with retrieved context and chat history."""
         context = "\n\n---\n\n".join(context_chunks)
         
+        history_str = ""
+        if history:
+            history_str += "Here is the recent conversation history:\n"
+            for user_msg, bot_msg in history:
+                history_str += f"User: {user_msg}\nBot: {bot_msg}\n"
+        
         prompt = f"""
-You are a helpful assistant. Use the following pieces of context to answer the question at the end.
-If you don't know the answer from the context provided, just say that you don't know. Do not try to make up an answer.
+You are a helpful assistant. Use the following pieces of context and the conversation history to answer the question at the end.
+If you don't know the answer from the context, just say that you don't know. Do not try to make up an answer.
 
-Context:
+{history_str}
+
+Context from documents:
 {context}
 
 Question: {query}
@@ -106,30 +67,35 @@ Question: {query}
 Helpful Answer:"""
         return prompt
 
-    def get_answer(self, query: str):
+    def get_answer(self, query: str, history: list = None):
         """
-        Retrieves an answer to a query using the RAG system.
+        Retrieves an answer to a query using the RAG system, now with history and caching.
         """
+        # --- NEW: Answer Caching ---
+        if query in self.answer_cache:
+            logging.info(f"Answer cache hit for query: '{query}'")
+            return self.answer_cache[query]
+
         if not self.vector_store:
             logging.error("Vector store is not loaded.")
             return "Error: The system is not ready. Please try again later.", []
 
-        logging.info(f"Processing query: {query}")
+        logging.info(f"Processing query with history: {query}")
         
-        # 1. Embed the user's query
-        query_embedding = self.embedding_model.encode([query])
+        # 1. Embed the user's query using the new cached method
+        query_embedding = self._get_query_embedding(query)
         
-        # 2. Perform similarity search in FAISS
+        # 2. Perform similarity search
         distances, indices = self.vector_store.search(np.array(query_embedding, dtype=np.float32), config.K_RETRIEVED_CHUNKS)
         
-        # 3. Retrieve the actual text chunks and sources
+        # 3. Retrieve chunks and sources
         retrieved_chunks = [self.documents[i]['text'] for i in indices[0]]
         retrieved_sources = [self.documents[i]['metadata'] for i in indices[0]]
         
-        # 4. Build the prompt
-        prompt = self._build_prompt(query, retrieved_chunks)
+        # 4. Build the prompt with history
+        prompt = self._build_prompt(query, retrieved_chunks, history)
 
-        # 5. Call the OpenAI API for generation
+        # 5. Call OpenAI API
         try:
             response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
@@ -144,14 +110,24 @@ Helpful Answer:"""
             logging.error(f"Error calling OpenAI API: {e}")
             answer = "Sorry, I encountered an error while generating the answer."
         
-        # Format sources for display
+        # Format sources for display (Refined to be more robust)
         sources = []
-        unique_sources = {}
-        for metadata in retrieved_sources:
-            filename = metadata['source']
-            if filename not in unique_sources:
-                unique_sources[filename] = metadata['chunk_id']
-                sources.append({"filename": filename, "snippet": self.documents[indices[0][0]]['text']})
+        if retrieved_sources:
+            # Use a set to only show unique source files
+            unique_filenames = set()
+            for i, metadata in enumerate(retrieved_sources):
+                filename = metadata.get('source', 'Unknown Source')
+                if filename not in unique_filenames:
+                    sources.append({
+                        "filename": filename,
+                        "snippet": self.documents[indices[0][i]]['text']
+                    })
+                    unique_filenames.add(filename)
 
         logging.info(f"Generated answer and found {len(sources)} unique source files.")
-        return answer, sources
+        
+        # --- NEW: Store result in answer cache ---
+        result = (answer, sources)
+        self.answer_cache[query] = result
+        
+        return result
