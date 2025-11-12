@@ -1,7 +1,7 @@
-python-telegram-bot
 sentence-transformers
 faiss-cpu
 openai
 python-dotenv
 numpy
 PyMuPDF
+python-telegram-bot[persistence]
